@@ -54,11 +54,8 @@ PyQt5
 
 Pyperclip
 
-🤝 Contributing
-Pull requests are welcome.
-If you’d like to contribute, please fork the repo and create a new branch for your feature or bugfix.
 
 📜 License
 This project is licensed under the MIT License.
-See the LICENSE file for details.
+
 
