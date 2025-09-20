@@ -62,5 +62,3 @@ If you’d like to contribute, please fork the repo and create a new branch for 
 This project is licensed under the MIT License.
 See the LICENSE file for details.
 
-yaml
-Copy code
