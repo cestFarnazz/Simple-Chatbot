@@ -108,25 +108,31 @@ class TestResourceLimitsUnixOnly(unittest.TestCase):
         result = run_code(code, memory_bytes=64 * 1024 * 1024, timeout=5)
         self.assertFalse(result.success)
 
-    def test_nproc_limit_is_configured(self):
+    def test_nproc_is_deliberately_not_constrained(self):
         """
-        The NPROC limit is now computed dynamically (current baseline for
-        this user + a fixed headroom), not a hardcoded number — so we just
-        check it's a sane positive value, not a specific constant.
+        sandbox.py deliberately does not set RLIMIT_NPROC (see the module
+        docstring for why two different attempts at this both failed on
+        real, non-root environments). This test just confirms the rlimit
+        is left at whatever the system/shell default is, not clamped down
+        by us to some small number.
         """
         code = "import resource; soft, _ = resource.getrlimit(resource.RLIMIT_NPROC); print(soft)"
         result = run_code(code, timeout=3)
         self.assertTrue(result.success)
-        self.assertGreater(int(result.stdout.strip()), 10)
+        # -1 conventionally means "unlimited"; otherwise just expect a
+        # generous system default, not a small number we imposed ourselves.
+        reported = int(result.stdout.strip())
+        self.assertTrue(reported == -1 or reported > 50)
 
-    def test_threading_module_is_not_blocked_by_process_limit(self):
+    def test_threading_module_is_not_blocked(self):
         """
-        Regression test for a real bug: RLIMIT_NPROC=1 (the original value)
-        silently broke any exercise using the threading module, because on
-        Linux RLIMIT_NPROC also counts threads, not just forked processes.
-        This only showed up once the sandbox ran as a non-root user (on
-        GitHub Actions) — under root, in this project's own analysis
-        environment, the limit had no effect, so the bug stayed hidden.
+        This exact scenario (two threads) is what motivated dropping
+        RLIMIT_NPROC entirely from this module: on Linux, RLIMIT_NPROC
+        counts threads too, not just forked processes, and no formula for
+        setting it (fixed value, or dynamic baseline+headroom) held up
+        reliably across environments. Since this rlimit is no longer set
+        by sandbox.py at all, this should always pass regardless of the
+        environment's own baseline process/thread count.
         """
         code = (
             "import threading\n"

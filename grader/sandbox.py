@@ -15,32 +15,37 @@ What this module actually provides is a "defense in depth" layer:
   3. RLIMIT_CPU, separate from the wall-clock timeout — for infinite loops
      that do consume CPU.
   4. RLIMIT_AS (memory cap) — blocks a simple memory bomb.
-  5. RLIMIT_NPROC, set dynamically per run — blocks a fork bomb. This
-     went through two real bugs before landing here:
-       a) A value of 1 silently broke any exercise using the threading
-          module (like "Threading"), because on Linux RLIMIT_NPROC
-          also counts threads, not just forked processes.
-       b) Raising it to a fixed 10 *still* failed on GitHub Actions,
-          because RLIMIT_NPROC counts *every* process/thread owned by
-          the same real user ID system-wide — not just this
-          subprocess's own descendants. A CI runner's user can already
-          have a baseline of other processes/threads running, which a
-          hardcoded limit doesn't account for and can already exceed.
-     The fix: count the current user's process/thread total right
-     before launching the sandboxed subprocess, and set the limit to
-     that count plus a fixed headroom (see NPROC_HEADROOM below). This
-     adapts to whatever the environment's baseline happens to be,
-     instead of guessing a fixed number.
-     Neither bug ever showed up in this project's own analysis
-     environment, because it runs as root, and root is exempt from
-     RLIMIT_NPROC entirely — which is exactly why running the real
-     verification on a non-root machine (GitHub Actions) mattered.
-  6. python -I (isolated mode) — no user site-packages, no PYTHONPATH.
+  5. python -I (isolated mode) — no user site-packages, no PYTHONPATH.
 
-⚠️ Critical warning: if this process runs as the root user, RLIMIT_NPROC/
-RLIMIT_NOFILE/RLIMIT_CORE have no effect on root (since root is exempt from
-these limits), and a fork bomb can get around them. In production this must
-run as an unprivileged (non-root) system user; this module warns on import.
+⚠️ This module does NOT limit process/thread count (RLIMIT_NPROC), and
+that omission is deliberate, not an oversight — it went through two
+failed real-world attempts first:
+  a) A fixed value of 1 silently broke any exercise using the threading
+     module (like "Threading"), because on Linux RLIMIT_NPROC also
+     counts threads, not just forked processes.
+  b) Computing the limit dynamically (the user's current process count
+     on the machine, plus a fixed headroom) *still* failed on GitHub
+     Actions. RLIMIT_NPROC counts every process/thread owned by the
+     same real user ID system-wide, not just this subprocess's own
+     descendants, and that system-wide baseline turned out to be
+     unpredictable enough across environments that no formula reliably
+     avoided false positives.
+Neither failure ever showed up in this project's own analysis
+environment, because it runs as root, and root is exempt from
+RLIMIT_NPROC entirely — which is exactly why it took a real run on a
+non-root machine (GitHub Actions) to catch both bugs, and why a third
+guessed number wasn't a responsible fix.
+The practical consequence: this backend does not reliably defend
+against a fork bomb. Real fork-bomb protection depends on
+sandbox_docker.py, whose `--pids-limit` is enforced by cgroups scoped
+to that specific container — not the whole machine — so it doesn't
+inherit this problem. Use SANDBOX_BACKEND=docker wherever that
+protection actually matters.
+
+⚠️ Critical warning: if this process runs as the root user, RLIMIT_NOFILE
+and RLIMIT_CORE have no effect on root (since root is exempt from these
+limits). In production this must run as an unprivileged (non-root) system
+user; this module warns on import.
 
 ⚠️ What this module does *not* make safe: network access, reading/writing
 files outside the temp directory, or arbitrary syscalls are not fully
@@ -67,10 +72,9 @@ if IS_UNIX:
 _RUNNING_AS_ROOT = IS_UNIX and hasattr(os, "geteuid") and os.geteuid() == 0
 if _RUNNING_AS_ROOT:
     warnings.warn(
-        "sandbox.py is running as the root user — RLIMIT_NPROC/RLIMIT_NOFILE/"
-        "RLIMIT_CORE are ineffective for root and don't count as real "
-        "protection. In production, always run this as an unprivileged "
-        "system user.",
+        "sandbox.py is running as the root user — RLIMIT_NOFILE/RLIMIT_CORE "
+        "are ineffective for root and don't count as real protection. In "
+        "production, always run this as an unprivileged system user.",
         RuntimeWarning,
         stacklevel=2,
     )
@@ -80,41 +84,7 @@ DEFAULT_TIMEOUT_SECONDS = 5.0
 DEFAULT_CPU_SECONDS = 3
 DEFAULT_MEMORY_BYTES = 128 * 1024 * 1024  # 128MB
 DEFAULT_MAX_OUTPUT_CHARS = 20_000
-NPROC_HEADROOM = 25  # how many *additional* processes/threads beyond the
-                      # current baseline this run is allowed to create
 DEFAULT_MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024  # 1MB
-
-
-def _current_process_count_for_uid(uid: int) -> int:
-    """
-    Counts how many processes/threads on the machine are currently owned
-    by the given real user ID, by reading /proc. This is what makes the
-    NPROC limit adaptive: RLIMIT_NPROC counts *every* process for that
-    uid system-wide, not just this subprocess's own descendants, so a
-    hardcoded limit can already be exceeded by the environment's own
-    baseline (this is exactly what broke on GitHub Actions).
-
-    Returns 0 if /proc isn't available (e.g. macOS) or on any read error —
-    callers should treat that as "unknown baseline" and still add the
-    usual headroom on top of it.
-    """
-    count = 0
-    try:
-        for entry in os.listdir("/proc"):
-            if not entry.isdigit():
-                continue
-            try:
-                with open(f"/proc/{entry}/status") as f:
-                    for line in f:
-                        if line.startswith("Uid:"):
-                            if int(line.split()[1]) == uid:
-                                count += 1
-                            break
-            except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
-                continue
-    except FileNotFoundError:
-        return 0
-    return count
 
 
 @dataclass
@@ -137,13 +107,16 @@ class ExecutionResult:
         return self.returncode in (-9, 137) or "MemoryError" in (self.stderr or "")
 
 
-def _apply_resource_limits(cpu_seconds, memory_bytes, max_processes, max_file_size_bytes):
-    """Runs in the child, right before exec, via preexec_fn (Unix only)."""
+def _apply_resource_limits(cpu_seconds, memory_bytes, max_file_size_bytes):
+    """
+    Runs in the child, right before exec, via preexec_fn (Unix only).
+    Deliberately does NOT set RLIMIT_NPROC — see the module docstring
+    for why that turned out to be unreliable across environments.
+    """
     def limiter():
         for rlimit, value in (
             (resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds)),
             (resource.RLIMIT_AS, (memory_bytes, memory_bytes)),
-            (resource.RLIMIT_NPROC, (max_processes, max_processes)),
             (resource.RLIMIT_FSIZE, (max_file_size_bytes, max_file_size_bytes)),
             (resource.RLIMIT_CORE, (0, 0)),
         ):
@@ -208,13 +181,8 @@ def run_code(
 
         preexec_fn = None
         if IS_UNIX:
-            # Adaptive NPROC limit: whatever the current baseline is for
-            # this user, allow NPROC_HEADROOM more on top of it. See the
-            # module docstring (point 5) for why a fixed number isn't safe.
-            baseline = _current_process_count_for_uid(os.getuid())
-            max_processes = baseline + NPROC_HEADROOM
             preexec_fn = _apply_resource_limits(
-                cpu_seconds, memory_bytes, max_processes, DEFAULT_MAX_FILE_SIZE_BYTES
+                cpu_seconds, memory_bytes, DEFAULT_MAX_FILE_SIZE_BYTES
             )
 
         proc = subprocess.run(

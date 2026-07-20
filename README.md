@@ -78,7 +78,7 @@ The project supports two ways to run student code in isolation:
 | | `grader/sandbox.py` (default) | `grader/sandbox_docker.py` |
 |---|---|---|
 | External dependency | None | Requires Docker installed |
-| Fork-bomb prevention | via `rlimit` (⚠️ ineffective for root) | via cgroups (enforced even for root) |
+| Fork-bomb prevention | ❌ None (see below for why) | via cgroups `--pids-limit` (enforced even for root) |
 | Network | Not blocked | Fully disabled (`--network none`) |
 | Filesystem | Only the working directory is isolated | Fully read-only |
 | Good for | Fast development, environments without Docker | Real (production) deployment |
@@ -112,27 +112,41 @@ lesson). Purely graphical exercises (like Tkinter) are marked with
 ## Security notes (honest, not just marketing)
 
 `grader/sandbox.py` runs student code in a separate subprocess with
-CPU, memory, process-count, and timeout limits. This level of
-isolation is acceptable for fast development or environments without
-Docker, but it has known limitations:
+CPU, memory, and wall-clock timeout limits. This level of isolation is
+acceptable for fast development or environments without Docker, but it
+has known limitations:
 
-- **⚠️ Never run this as root/Administrator.** On Linux, a root
-  process is exempt from `RLIMIT_NPROC` — meaning the fork-bomb
-  prevention limit is effectively a no-op. This module warns at import
-  time if it's running as root; in production it should run as an
-  unprivileged system user. (This is exactly what once crashed the
-  entire development environment during this project's build — which
-  is why the real fork-bomb test was removed from the test suite and
-  replaced with a safe check instead.)
+- **⚠️ It does not defend against a fork bomb.** This was not a design
+  choice made lightly — it went through two real, failed fixes first.
+  A fixed `RLIMIT_NPROC` of 1 silently broke any exercise using the
+  `threading` module (since Linux counts threads against this limit
+  too, not just forked processes). Computing the limit dynamically
+  (current process count for the user + a fixed headroom) *still*
+  failed on GitHub Actions, because `RLIMIT_NPROC` counts every
+  process/thread for that user ID **system-wide**, not just this
+  subprocess's own descendants — and that system-wide baseline turned
+  out to vary unpredictably across environments. Neither failure ever
+  showed up in this project's own development environment, because it
+  ran as root, and root is exempt from `RLIMIT_NPROC` entirely — which
+  is exactly why it took two different real, non-root runs (once
+  crashing the dev environment directly, once failing in CI) to
+  uncover both problems. Rather than guess a third number, this
+  backend now leaves `RLIMIT_NPROC` alone and relies on
+  `sandbox_docker.py` for real fork-bomb protection.
+- **⚠️ Never run this as root/Administrator anyway.** Even without
+  `RLIMIT_NPROC`, root is exempt from `RLIMIT_CORE`/`RLIMIT_NOFILE`
+  too. In production this should run as an unprivileged system user.
 - This sandbox does not fully block network or filesystem access.
 
 `grader/sandbox_docker.py` closes these gaps: `--network none` fully
 disables networking, `--read-only` makes the filesystem read-only,
-and — most importantly — the process-count limit is enforced via
-**cgroups**, which, unlike `rlimit`, cannot be bypassed even by root.
-This is the same approach real code-judging platforms use (like the
-open-source project Judge0). This backend is recommended for real
-deployments.
+and — most importantly — `--pids-limit` provides real fork-bomb
+protection via **cgroups**, which (unlike `rlimit`) is scoped to the
+container itself rather than the whole machine, so it doesn't inherit
+the system-wide-baseline problem above. This is the same approach real
+code-judging platforms use (like the open-source project Judge0). This
+backend is recommended for real deployments, and is the only one of
+the two that meaningfully protects against a fork bomb.
 
 - On Windows (with the default backend), the `resource` module doesn't
   exist; only the wall-clock timeout remains as protection.
