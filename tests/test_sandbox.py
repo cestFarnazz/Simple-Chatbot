@@ -110,14 +110,14 @@ class TestResourceLimitsUnixOnly(unittest.TestCase):
 
     def test_nproc_limit_is_configured(self):
         """
-        Instead of running a real fork bomb (which once crashed the entire
-        environment), we just report the configured rlimit value from
-        inside the subprocess.
+        The NPROC limit is now computed dynamically (current baseline for
+        this user + a fixed headroom), not a hardcoded number — so we just
+        check it's a sane positive value, not a specific constant.
         """
         code = "import resource; soft, _ = resource.getrlimit(resource.RLIMIT_NPROC); print(soft)"
         result = run_code(code, timeout=3)
         self.assertTrue(result.success)
-        self.assertEqual(result.stdout.strip(), "10")
+        self.assertGreater(int(result.stdout.strip()), 10)
 
     def test_threading_module_is_not_blocked_by_process_limit(self):
         """
