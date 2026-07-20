@@ -15,7 +15,15 @@ What this module actually provides is a "defense in depth" layer:
   3. RLIMIT_CPU, separate from the wall-clock timeout — for infinite loops
      that do consume CPU.
   4. RLIMIT_AS (memory cap) — blocks a simple memory bomb.
-  5. RLIMIT_NPROC=0 — blocks a fork bomb.
+  5. RLIMIT_NPROC, capped at a small number — blocks a fork bomb. This
+     limit had to be raised from 1 to 10 after a real CI failure: on
+     Linux, RLIMIT_NPROC also counts threads (not just forked
+     processes), so a value of 1 silently broke any exercise using the
+     threading module (like the "Threading" lesson) as soon as this
+     ran under a real non-root user (GitHub Actions' runner) — under
+     root, in this project's own analysis environment, the limit had
+     no effect at all, which is exactly why this bug stayed hidden
+     until the first non-root run.
   6. python -I (isolated mode) — no user site-packages, no PYTHONPATH.
 
 ⚠️ Critical warning: if this process runs as the root user, RLIMIT_NPROC/
@@ -61,7 +69,7 @@ DEFAULT_TIMEOUT_SECONDS = 5.0
 DEFAULT_CPU_SECONDS = 3
 DEFAULT_MEMORY_BYTES = 128 * 1024 * 1024  # 128MB
 DEFAULT_MAX_OUTPUT_CHARS = 20_000
-DEFAULT_MAX_PROCESSES = 1  # itself only, no new children
+DEFAULT_MAX_PROCESSES = 10  # see note below
 DEFAULT_MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024  # 1MB
 
 

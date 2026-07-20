@@ -117,7 +117,30 @@ class TestResourceLimitsUnixOnly(unittest.TestCase):
         code = "import resource; soft, _ = resource.getrlimit(resource.RLIMIT_NPROC); print(soft)"
         result = run_code(code, timeout=3)
         self.assertTrue(result.success)
-        self.assertEqual(result.stdout.strip(), "1")
+        self.assertEqual(result.stdout.strip(), "10")
+
+    def test_threading_module_is_not_blocked_by_process_limit(self):
+        """
+        Regression test for a real bug: RLIMIT_NPROC=1 (the original value)
+        silently broke any exercise using the threading module, because on
+        Linux RLIMIT_NPROC also counts threads, not just forked processes.
+        This only showed up once the sandbox ran as a non-root user (on
+        GitHub Actions) — under root, in this project's own analysis
+        environment, the limit had no effect, so the bug stayed hidden.
+        """
+        code = (
+            "import threading\n"
+            "def job():\n"
+            "    pass\n"
+            "t1 = threading.Thread(target=job)\n"
+            "t2 = threading.Thread(target=job)\n"
+            "t1.start(); t2.start()\n"
+            "t1.join(); t2.join()\n"
+            "print('ok')\n"
+        )
+        result = run_code(code, timeout=5)
+        self.assertTrue(result.success, msg=f"stderr was: {result.stderr}")
+        self.assertEqual(result.stdout.strip(), "ok")
 
 
 if __name__ == "__main__":
