@@ -1,0 +1,17 @@
+# Python cache files
+__pycache__/
+*.pyc
+
+# Local, per-user progress database
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python virtual environment
+venv/
+.venv/
+
+# Windows/Mac temp files
+Thumbs.db
+.DS_Store
